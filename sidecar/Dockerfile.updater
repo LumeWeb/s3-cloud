@@ -1,0 +1,18 @@
+FROM docker:29-cli
+
+RUN apk add --no-cache curl bash coreutils jq docker-cli-compose su-exec
+
+# The base image already has a docker group. Add a non-root user to it
+# so the Docker socket is accessible.
+RUN adduser -u 1000 -S appuser -G docker
+
+COPY updater.sh /usr/local/bin/updater.sh
+RUN chmod +x /usr/local/bin/updater.sh
+
+# Named volumes are initialized by the first container that mounts them
+# (s3-server), so Dockerfile chown is ineffective. Use an entrypoint
+# that fixes /state ownership as root before dropping to uid 1000.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

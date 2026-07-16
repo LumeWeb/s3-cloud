@@ -1,0 +1,65 @@
+# Standalone Docker Compose deployment for s3-server + update sidecar
+# Docs: https://hermes-agent.nousresearch.com/docs
+#
+# Auto-update defaults to ON. Toggle: touch /state/autoupdate.disabled
+# Manual: touch /state/update.trigger  Logs: /state/updater.log
+
+name: s3-deployment
+
+services:
+  s3-server:
+    image: ghcr.io/lumeweb/s3-server:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - s3-data:/data
+      - s3-state:/state
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/_panel/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  updater:
+    image: ghcr.io/lumeweb/s3-server-updater:latest
+    restart: unless-stopped
+    depends_on:
+      s3-server:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to host docker group id (getent group docker | cut -d: -f3)}"
+    environment:
+      - UPDATE_INTERVAL=21600   # 6 hours in seconds
+      - UPDATER_PROJECT_DIR=/opt/s3-server
+      - COMPOSE_SERVICE=s3-server
+      - DOCKER_GID=${DOCKER_GID}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # grants host root; accepted risk
+      - ./:/opt/s3-server:ro                           # compose file for sidecar
+      - s3-state:/state                                # shared flag-file channel
+    networks:
+      - frontend
+      - backend
+
+volumes:
+  s3-data:
+  s3-state:
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true

@@ -1,0 +1,6 @@
+# Hermes internal
+.hermes/
+
+# OS
+.DS_Store
+Thumbs.db
