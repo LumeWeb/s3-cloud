@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# 001_onboot - cloud-init per-instance boot script for DigitalOcean
+# Starts s3-server.service on first boot and every subsequent boot.
+set -euo pipefail
+
+# Remove the SSH force-logout block added during build so users
+# can log in once first-boot setup is complete.
+sed -e '/Match User root/d' \
+    -e '/.*ForceCommand.*droplet.*/d' \
+    -i /etc/ssh/sshd_config
+systemctl restart ssh
+
+# Wait for Docker daemon to be ready (up to 60s)
+for _ in $(seq 1 30); do
+    if docker info >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+
+# Start s3-server service if not already running or activating.
+SERVICE_STATE=$(systemctl is-active s3-server.service 2>/dev/null || true)
+if [ "$SERVICE_STATE" != "active" ] && [ "$SERVICE_STATE" != "activating" ]; then
+    systemctl start s3-server.service
+fi

@@ -8,7 +8,7 @@ s3-cloud: multi-platform deployment configs for [s3-server](https://github.com/L
 
 - **Docker image**: `ghcr.io/lumeweb/s3-server:latest` (amd64 + arm64)
 - **Updater image**: `ghcr.io/lumeweb/s3-server-updater:latest`
-- **S3 API port**: 8080
+- **S3 API port**: 80 (host), 8080 (container internal)
 - **Data volume**: `/data` (DB + upload staging)
 - **State volume**: `/state` (sidecar flag files)
 - **GitHub org**: `lumeweb` (used in all URLs, GHCR paths, Go module paths)

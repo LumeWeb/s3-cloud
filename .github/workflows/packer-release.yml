@@ -1,0 +1,143 @@
+# Marketplace release: build snapshot, validate, submit to Vendor Portal.
+# Build and submit are separate jobs so a build can succeed independently
+# of whether the marketplace listing is ready to update.
+
+name: Marketplace Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      vendor:
+        description: 'Target vendor directory'
+        required: false
+        default: 'digitalocean'
+        type: string
+      reason:
+        description: 'Reason for update (shown in Vendor Portal)'
+        required: false
+        default: 'Automated release'
+        type: string
+      version:
+        description: 'App version string (e.g. 1.0.0)'
+        required: true
+        type: string
+
+env:
+  VENDOR: ${{ github.event.inputs.vendor || 'digitalocean' }}
+  RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+  RELEASE_REASON: ${{ github.event.inputs.reason || 'Automated release' }}
+
+concurrency:
+  group: marketplace-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+
+      - name: Configure SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # Successfully decoded as base64
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H digitalocean.com >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Build snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          cd deploy/"$VENDOR"
+          make build
+
+      - name: Validate snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          cd deploy/"$VENDOR"
+          make validate
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: deploy/${{ env.VENDOR }}/manifest.json
+          retention-days: 7
+
+  submit:
+    needs: build-and-validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+      DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+          path: deploy/${{ env.VENDOR }}/
+
+      - name: Submit to Vendor Portal
+        run: |
+          cd deploy/"$VENDOR"
+          # Strip leading 'v' from tag names (v1.2.3 -> 1.2.3)
+          CLEAN_VERSION="${RELEASE_VERSION#v}"
+          if ! printf '%s' "$CLEAN_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid version string: $CLEAN_VERSION"
+            exit 1
+          fi
+          make submit DRY_RUN=false VERSION="$CLEAN_VERSION" REASON="$RELEASE_REASON"
+
+  job-summary:
+    needs: [build-and-validate, submit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "## Marketplace Release"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Vendor | $VENDOR |"
+            echo "| Version | $RELEASE_VERSION |"
+            echo "| Reason | $RELEASE_REASON |"
+            echo "| Build + Validate | ${{ needs.build-and-validate.result }} |"
+            echo "| Submit | ${{ needs.submit.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

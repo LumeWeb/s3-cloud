@@ -1,0 +1,283 @@
+# PR CI: lint + build snapshot + validate + cleanup.
+# Builds real snapshots in the vendor cloud to catch provisioning issues.
+# Build jobs are gated to collaborators only to prevent unauthorized cloud spend.
+#
+# Cleanup behavior:
+#   - PR opened/synchronized: build + validate, NO cleanup (snapshot kept until PR closes)
+#   - PR closed: cleanup only (delete snapshots matching pinner-s3-do-* prefix)
+#   - Push to develop: build + validate + cleanup (ephemeral)
+#   - Manual dispatch: build + validate, NO cleanup by default (manual testing)
+
+name: Packer CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+    paths:
+      - 'deploy/**'
+      - 'packer/scripts/**'
+      - 'scripts/**'
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+  push:
+    branches:
+      - develop
+    paths:
+      - 'deploy/**'
+      - 'packer/scripts/**'
+      - 'scripts/**'
+  workflow_dispatch:
+    inputs:
+      skip-cleanup:
+        description: 'Skip cleanup after build (keep snapshot for manual testing)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+concurrency:
+  group: packer-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    # Skip lint on PR close (cleanup-only run)
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      vendor: ${{ steps.detect-vendor.outputs.vendor }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect vendor from changed files
+        id: detect-vendor
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "vendor=digitalocean" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            DIFF_RANGE="HEAD~1..HEAD"
+          else
+            DIFF_RANGE="origin/develop...HEAD"
+          fi
+          if git diff --name-only "$DIFF_RANGE" | grep -q '^deploy/digitalocean/'; then
+            echo "vendor=digitalocean" >> "$GITHUB_OUTPUT"
+          else
+            echo "vendor=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Packer init
+        run: packer init deploy/digitalocean/
+
+      - name: Packer format check
+        run: packer fmt -check deploy/digitalocean/
+
+      - name: Packer syntax validate
+        run: packer validate -syntax-only deploy/digitalocean/template.pkr.hcl
+
+      - name: Shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          additional_files: >-
+            deploy/digitalocean/scripts/014-ufw-s3.sh
+            deploy/digitalocean/scripts/018-force-ssh-logout.sh
+            deploy/digitalocean/scripts/020-application-tag.sh
+            deploy/digitalocean/scripts/900-cleanup.sh
+            deploy/digitalocean/scripts/validate.sh
+            deploy/digitalocean/files/var/lib/cloud/scripts/per-instance/001_onboot
+
+      - name: Python compile check
+        run: python3 -m py_compile deploy/digitalocean/submit.py deploy/digitalocean/scripts/prune-resources.py
+
+      - name: Makefile syntax check
+        run: make -C deploy/digitalocean -n all
+
+  check-permissions:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Check if actor is a collaborator
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          # Push events and manual dispatch are always authorized
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Check if the triggering actor is a repo collaborator
+          if gh api "repos/${{ github.repository }}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null | grep -qE 'admin|write|maintain'; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Build skipped: ${ACTOR} is not a collaborator"
+          fi
+
+  build-and-validate:
+    needs: [lint, check-permissions]
+    if: needs.lint.outputs.vendor != '' && needs.check-permissions.outputs.authorized == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: ${{ needs.lint.outputs.vendor }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+
+      - name: Configure SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # Successfully decoded as base64
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H digitalocean.com >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Build snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -n "$PR_NUMBER" ]; then
+            make build SNAPSHOT_PREFIX="pinner-s3-do-pr-${PR_NUMBER}-"
+          else
+            make build
+          fi
+
+      - name: Validate snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          cd deploy/"$VENDOR"
+          make validate
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest
+          path: deploy/${{ env.VENDOR }}/manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  cleanup:
+    # Cleanup runs when:
+    #   - PR is closed (merged or not): delete all pinner-s3-do-* snapshots
+    #   - Push to develop: delete the snapshot from this run's manifest
+    #   - Manual dispatch with skip-cleanup=false: delete the snapshot from this run's manifest
+    # NOT when: manual dispatch with skip-cleanup=true (default, for manual testing)
+    # NOT when: PR opened/synchronized (snapshot kept until PR closes)
+    needs: [lint, check-permissions, build-and-validate]
+    if: |
+      always() && (
+        github.event.action == 'closed' ||
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.skip-cleanup == 'false')
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: ${{ needs.lint.outputs.vendor }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      EVENT_ACTION: ${{ github.event.action }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+
+      - name: Download manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: manifest
+          path: deploy/digitalocean/
+        continue-on-error: true
+
+      - name: Delete snapshot(s)
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # On PR close: delete ALL pinner-s3-do-* snapshots (excluding marketplace-linked).
+          # Each sync push creates a new snapshot with -force, so N pushes = N snapshots.
+          # The prune script handles marketplace protection via DO_VENDOR_APP_ID.
+          #
+          # On push/manual: delete only the specific snapshot from this run's manifest.
+          #                 If no manifest (build failed), skip to avoid deleting other PRs' snapshots.
+          if [ "$EVENT_ACTION" = "closed" ]; then
+            echo "PR closed: cleaning up snapshots for PR #${PR_NUMBER}..."
+            cd deploy/digitalocean
+            if [ -n "$PR_NUMBER" ]; then
+              python3 scripts/prune-resources.py --max-age-hours 0 --prefix "pinner-s3-do-pr-${PR_NUMBER}-"
+            else
+              echo "No PR number, skipping cleanup."
+            fi
+          else
+            VENDOR="${VENDOR:-digitalocean}"
+            cd deploy/"$VENDOR"
+            if [ -f manifest.json ]; then
+              make cleanup-snapshot
+            else
+              echo "No manifest found. Skipping cleanup to avoid deleting other PRs' snapshots."
+            fi
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Packer CI Cleanup"
+            echo ""
+            echo "| Trigger | Action |"
+            echo "|---------|--------|"
+            echo "| ${GITHUB_EVENT_NAME} | ${EVENT_ACTION} |"
+            echo ""
+            echo "Cleanup status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

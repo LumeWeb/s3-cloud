@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# Configured as part of the DigitalOcean 1-Click Image build process
+
+myip=$(hostname -I | awk '{print $1}')
+cat <<EOF
+********************************************************************************
+
+Welcome to the Pinner S3 Server 1-Click Droplet.
+
+Private, self-hosted S3-compatible object storage on port 80.
+Auto-update is ON by default (sidecar checks every 6 hours).
+
+* Access the S3 API at: http://$myip/
+* docker-compose.yml is at: /opt/s3-server/docker-compose.yml
+* Auto-update logs: cat /state/updater.log
+* Disable auto-update: touch /state/autoupdate.disabled
+* Force update check: touch /state/update.trigger
+
+For help and more information, visit:
+  https://github.com/LumeWeb/s3-server
+
+********************************************************************************
+
+To delete this message of the day: rm -rf $(readlink -f ${0})
+EOF
