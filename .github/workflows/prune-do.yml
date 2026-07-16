@@ -1,0 +1,46 @@
+# Prune stale DigitalOcean snapshots and droplets to avoid paying for dead CI resources.
+# Runs daily at 06:00 UTC. Deletes resources older than 24 hours matching pinner-s3-do-*.
+# Snapshots linked to the marketplace listing are protected.
+
+name: Prune DO Resources
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      max-age-hours:
+        description: 'Max age in hours before pruning'
+        required: false
+        default: '24'
+        type: string
+      dry-run:
+        description: 'Dry run (print only, no deletion)'
+        required: false
+        default: 'false'
+        type: string
+
+env:
+  MAX_AGE_HOURS: ${{ github.event.inputs.max-age-hours || '24' }}
+  DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Prune stale DO resources
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+        run: |
+          cd deploy/digitalocean
+          ARGS="--max-age-hours $MAX_AGE_HOURS"
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python3 scripts/prune-resources.py $ARGS

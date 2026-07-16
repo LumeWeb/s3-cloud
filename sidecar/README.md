@@ -8,7 +8,7 @@
 │                                                       │
 │  ┌─────────────┐               ┌──────────────────┐  │
 │  │  s3-server   │   ← shared →  │  s3-updater      │  │
-│  │  port 8080   │   /state      │  (this sidecar)  │  │
+│  │  port 80   │   /state      │  (this sidecar)  │  │
 │  │              │               │                   │  │
 │  │  /data  ✓    │               │  docker.sock rw ✓│  │
 │  │  /state ✓    │               │  /state      ✓   │  │
@@ -99,5 +99,5 @@ docker build -t ghcr.io/lumeweb/s3-server-updater:latest \
 - `bash` + `coreutils` (`date`, `tee`, `sed`, `tr`)
 
 The compose file mounts the host's `/var/run/docker.sock` into the sidecar
-(read-write; grants host root — accepted risk) so it can drive `docker compose`
+(read-write; grants host root; accepted risk) so it can drive `docker compose`
 on the host; s3-server never sees the socket.

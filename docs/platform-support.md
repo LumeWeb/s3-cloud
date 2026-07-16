@@ -10,7 +10,9 @@ Deployment targets for s3-server. All use the same Docker image (`ghcr.io/lumewe
 
 ## Cloud VM Marketplaces
 
-_Platform configs will be added here as providers are onboarded._
+| Platform | Install | Update | Difficulty | Docs |
+|---|---|---|---|---|
+| DigitalOcean | 1-Click Droplet or Packer snapshot | Sidecar (auto-update ON by default) | Easy | [README](../deploy/digitalocean/README.md) |
 
 ## PaaS
 
@@ -33,7 +35,7 @@ _Platform configs will be added here as providers are onboarded._
 
 - **Image**: `ghcr.io/lumeweb/s3-server:latest` (amd64 + arm64)
 - **Updater image**: `ghcr.io/lumeweb/s3-server-updater:latest` (multi-arch, built by this repo's CI)
-- **Binary**: `s3-server` (Go, SQLite, port 8080)
+- **Binary**: `s3-server` (Go, SQLite, port 80)
 - **Update sidecar**: polls GHCR `:latest` every 6h, compares digest, recreates container on change (~170 lines bash)
 - **Sidecar flag files** (shared `/state` volume): `autoupdate.enabled`, `autoupdate.disabled`, `update.trigger`, `last-digest`, `updater.log`
 - No `os/exec` in s3-server, no tini, no Docker-in-Docker, no Watchtower

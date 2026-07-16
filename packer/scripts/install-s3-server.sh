@@ -65,7 +65,7 @@ services:
     image: ghcr.io/lumeweb/s3-server:latest
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "80:8080"
     volumes:
       - s3-data:/data
       - s3-state:/state
@@ -165,7 +165,7 @@ Pinner.xyz S3 Server - Private, zero-knowledge self-hosted S3-compatible object 
 ## Quick Start
 1. **Boot the VM** - the s3-server systemd service starts automatically.
 2. **Verify**: `systemctl status s3-server` should be active.
-3. **Access**: S3 API on port 8080.
+3. **Access**: S3 API on port 80.
 
 ## Auto-Update
 Auto-update is **enabled by default**. The update sidecar checks for new
