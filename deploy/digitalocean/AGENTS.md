@@ -22,12 +22,12 @@ DigitalOcean Marketplace deployment specifics. See `deploy/AGENTS.md` for the pl
 
 ### Required Scripts (run as final Packer provisioners)
 
-| Script | Purpose |
-|--------|---------|
-| `scripts/014-ufw-s3.sh` | Enable ufw firewall (SSH + port 8080, Docker FORWARD policy) |
-| `scripts/020-application-tag.sh` | Write app metadata to `/var/lib/digitalocean/application.info` |
-| `scripts/018-force-ssh-logout.sh` | Block SSH until `001_onboot` completes first-boot setup |
-| `scripts/900-cleanup.sh` | Clear logs, SSH keys, bash history, zero disk, purge `droplet-agent` |
+| Script | Source | Purpose |
+|--------|--------|---------|
+| `shared/scripts/014-ufw-s3.sh` | Shared | Enable ufw firewall (SSH + port 80, Docker FORWARD policy) |
+| `scripts/020-application-tag.sh` | DO-specific | Write app metadata to `/var/lib/digitalocean/application.info` |
+| `shared/scripts/018-force-ssh-logout.sh` | Shared | Block SSH until `001_onboot` completes first-boot setup |
+| `scripts/900-cleanup.sh` | DO-specific | Clear logs, SSH keys, bash history, zero disk, purge `droplet-agent` |
 
 ### Validation Tool
 
@@ -69,6 +69,6 @@ Note: the repo's default branch is `master`, not `main`; using `main` returns 40
 
 - **`droplet-agent` purge**: DO base images ship with the droplet-agent pre-installed. The cleanup script must `apt-get purge droplet-agent` or `99-img-check.sh` will fail. The purge leaves stale systemd unit files; warnings are harmless.
 - **Snapshot naming**: Packer names snapshots as `pinner-s3-do-<timestamp>`. All vendors use the `pinner-s3-<vendor>-` prefix. DO doesn't charge for snapshots in the region they were created.
-- **Cleanup**: PR CI builds call `make cleanup-snapshot` after validation to delete the snapshot. Release builds persist the snapshot for marketplace submission.
+- **Cleanup**: PR CI builds (`packer-ci-digitalocean.yml`) clean up snapshots inline on failure and on PR close. Release builds (`packer-release-digitalocean.yml`) persist the snapshot for marketplace submission. Prune scripts are split: `prune-snapshots.py` (snapshots only, `--prefix` required) and `prune-instances.py` (droplets only, `--prefix` required). Never combine.
 - **Build on `s-1vcpu-1gb`**: DO recommends the smallest droplet size for builds to ensure widest plan compatibility for end users.
 - **Base image**: Currently `ubuntu-22-04-x64`. DO now recommends `ubuntu-24-04-x64` for new marketplace listings.

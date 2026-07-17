@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# 001_onboot - cloud-init per-instance boot script
+# Provider-agnostic: starts s3-server.service on first boot and every subsequent boot.
+# NOTE: Do NOT use set -e here. Cloud-init treats non-zero exit as a failure
+# and will mark the entire instance setup as failed, which blocks downstream
+# modules and surfaces as "FAIL: running config-scripts_per-instance".
+set -uo pipefail
+
+# Ensure /usr/sbin is in PATH (cloud-init runs with a minimal PATH)
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+# Remove the SSH force-logout block added during build so users
+# can log in once first-boot setup is complete.
+sed -e '/Match User root/d' \
+    -e '/.*ForceCommand.*server.*/d' \
+    -i /etc/ssh/sshd_config || true
+systemctl restart ssh || true
+
+# Ensure firewall is active (cloud-init or snapshot restore may reset it).
+# ufw --force enable can silently fail to load iptables rules if kernel
+# modules aren't ready yet on a freshly restored snapshot. Reload after
+# enabling to ensure rules are actually loaded into the kernel.
+if command -v ufw >/dev/null 2>&1; then
+    ufw --force enable 2>&1 || echo "[001_onboot] WARNING: ufw enable failed"
+    ufw reload 2>&1 || echo "[001_onboot] WARNING: ufw reload failed"
+else
+    echo "[001_onboot] WARNING: ufw not found"
+fi
+
+# Wait for Docker daemon to be ready (up to 60s)
+for _ in $(seq 1 30); do
+    if docker info >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+
+# Start s3-server service if not already running or activating.
+SERVICE_STATE=$(systemctl is-active s3-server.service 2>/dev/null || true)
+if [ "$SERVICE_STATE" != "active" ] && [ "$SERVICE_STATE" != "activating" ]; then
+    systemctl start s3-server.service || true
+fi
+
+exit 0

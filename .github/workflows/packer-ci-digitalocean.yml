@@ -1,0 +1,163 @@
+# CI workflow for DigitalOcean builds.
+# Triggered by packer-ci.yml dispatcher via workflow_dispatch (gh workflow run --ref).
+# Builds a snapshot, validates it, cleans up on failure.
+# Snapshots are kept until PR close (dispatcher sends cleanup-mode=close) or
+# push-to-develop (ephemeral, cleaned inline).
+
+name: CI DigitalOcean
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot-prefix:
+        description: 'Snapshot prefix (e.g. pinner-s3-do-pr-123- or pinner-s3-do-ci-)'
+        required: true
+        type: string
+      cleanup-mode:
+        description: 'Cleanup mode: none, inline (delete after validate), or close (delete all PR snapshots)'
+        required: false
+        default: 'inline'
+        type: choice
+        options:
+          - 'inline'
+          - 'none'
+          - 'close'
+      pr-number:
+        description: 'PR number (for close cleanup)'
+        required: false
+        type: string
+
+concurrency:
+  group: ci-digitalocean-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-validate:
+    if: inputs.cleanup-mode != 'close'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: digitalocean
+      SNAPSHOT_PREFIX: ${{ inputs.snapshot-prefix }}
+      CLEANUP_MODE: ${{ inputs.cleanup-mode }}
+      PR_NUMBER: ${{ inputs.pr-number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # base64 decoded
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H digitalocean.com >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+
+      - name: Build snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+          PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          make build SNAPSHOT_PREFIX="$SNAPSHOT_PREFIX"
+
+      - name: Validate snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          cd deploy/"$VENDOR"
+          make validate
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-digitalocean
+          path: deploy/digitalocean/manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup on success (inline mode)
+        if: success() && inputs.cleanup-mode == 'inline'
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            echo "==> Cleaning up snapshot (inline mode)..."
+            make cleanup-snapshot || echo "Warning: manifest cleanup failed, daily prune will catch it"
+          fi
+
+      - name: Cleanup on failure
+        if: failure()
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Build or validate failed — delete the snapshot so it doesn't accrue charges.
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            echo "==> Cleaning up snapshot from failed build/validate..."
+            make cleanup-snapshot || echo "Warning: manifest cleanup failed, daily prune will catch it"
+          fi
+          # Prune any orphaned snapshots with this prefix
+          python3 scripts/prune-snapshots.py --max-age-hours 0 --prefix "$SNAPSHOT_PREFIX" 2>/dev/null \
+            || echo "Warning: prune fallback failed, daily prune will catch it"
+
+  cleanup:
+    if: inputs.cleanup-mode == 'close'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: digitalocean
+      PR_NUMBER: ${{ inputs.pr-number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+
+      - name: Delete PR snapshots
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR number, skipping cleanup."
+            exit 0
+          fi
+          PREFIX="pinner-s3-do-pr-${PR_NUMBER}-"
+          echo "==> Cleaning up snapshots with prefix: $PREFIX"
+          cd deploy/digitalocean
+          python3 scripts/prune-snapshots.py --max-age-hours 0 --prefix "$PREFIX"

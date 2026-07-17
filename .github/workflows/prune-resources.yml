@@ -1,0 +1,101 @@
+# Prune stale cloud snapshots and instances to avoid paying for dead CI resources.
+# Runs daily at 06:00 UTC. Deletes resources older than 24 hours matching pinner-s3-<vendor>-*.
+# Snapshots linked to a marketplace listing are protected (DO only).
+#
+# Snapshot prefixes covered:
+#   - pinner-s3-<vendor>-pr-*  (PR builds)
+#   - pinner-s3-<vendor>-ci-*  (develop-push builds)
+# Release snapshots (bare pinner-s3-<vendor>-*) are never targeted.
+
+name: Prune Cloud Resources
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      max-age-hours:
+        description: 'Max age in hours before pruning'
+        required: false
+        default: '24'
+        type: string
+      dry-run:
+        description: 'Dry run (print only, no deletion)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      vendor:
+        description: 'Vendor to prune (all, digitalocean, vultr)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'digitalocean'
+          - 'vultr'
+
+env:
+  MAX_AGE_HOURS: ${{ github.event.inputs.max-age-hours || '24' }}
+  DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+
+jobs:
+  resolve-vendors:
+    runs-on: ubuntu-latest
+    outputs:
+      vendors: ${{ steps.resolve.outputs.vendors }}
+    steps:
+      - id: resolve
+        run: |
+          VENDOR="${{ github.event.inputs.vendor || 'all' }}"
+          if [ "$VENDOR" = "all" ]; then
+            echo 'vendors=["digitalocean","vultr"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "vendors=[\"$VENDOR\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  prune:
+    needs: resolve-vendors
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        vendor: ${{ fromJson(needs.resolve-vendors.outputs.vendors) }}
+      fail-fast: false
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Prune stale ${{ matrix.vendor }} resources
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+        run: |
+          cd deploy/${{ matrix.vendor }}
+          MAX_AGE="${MAX_AGE_HOURS}"
+          if echo "$DRY_RUN" | grep -qi '^true$'; then
+            DRY_ARG="--dry-run"
+          else
+            DRY_ARG=""
+          fi
+
+          # Prune PR builds (pinner-s3-<vendor>-pr-*) and develop-push CI
+          # builds (pinner-s3-<vendor>-ci-*). Release snapshots use the
+          # bare prefix (pinner-s3-<vendor>-<timestamp>) and are protected
+          # by prefix separation.
+          case "${{ matrix.vendor }}" in
+            digitalocean)
+              python3 scripts/prune-snapshots.py --max-age-hours "$MAX_AGE" --prefix "pinner-s3-do-pr-" $DRY_ARG
+              python3 scripts/prune-snapshots.py --max-age-hours "$MAX_AGE" --prefix "pinner-s3-do-ci-" $DRY_ARG
+              python3 scripts/prune-instances.py --max-age-hours "$MAX_AGE" --prefix "pinner-s3-do-" $DRY_ARG
+              ;;
+            vultr)
+              python3 scripts/prune-snapshots.py --max-age-hours "$MAX_AGE" --prefix "pinner-s3-vultr-pr-" $DRY_ARG
+              python3 scripts/prune-snapshots.py --max-age-hours "$MAX_AGE" --prefix "pinner-s3-vultr-ci-" $DRY_ARG
+              python3 scripts/prune-instances.py --max-age-hours "$MAX_AGE" --prefix "pinner-s3-vultr-" $DRY_ARG
+              ;;
+          esac

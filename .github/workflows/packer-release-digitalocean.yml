@@ -1,0 +1,113 @@
+# Release workflow for DigitalOcean marketplace.
+# Triggered by packer-release.yml dispatcher via workflow_dispatch (gh workflow run --ref).
+# Builds a snapshot, validates it, submits to the DO Marketplace.
+
+name: Release DigitalOcean
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0)'
+        required: true
+        type: string
+      reason:
+        description: 'Release reason (e.g. initial-release)'
+        required: false
+        default: 'initial-release'
+        type: string
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: digitalocean
+      SNAPSHOT_PREFIX: pinner-s3-do-
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # base64 decoded
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H digitalocean.com >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+
+      - name: Build snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+          PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          make build SNAPSHOT_PREFIX="$SNAPSHOT_PREFIX"
+
+      - name: Validate snapshot
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          cd deploy/"$VENDOR"
+          make validate
+
+      - name: Submit to marketplace
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_REASON: ${{ inputs.reason }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ ! -f manifest.json ]; then
+            echo "No manifest found, build may have failed."
+            exit 1
+          fi
+          CLEAN_VERSION="${RELEASE_VERSION#v}"
+          if ! printf '%s' "$CLEAN_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid version string: $CLEAN_VERSION"
+            exit 1
+          fi
+          make submit DRY_RUN=false VERSION="$CLEAN_VERSION" REASON="$RELEASE_REASON"
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-digitalocean
+          path: deploy/digitalocean/manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup on validation failure
+        if: failure()
+        env:
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            make cleanup-snapshot || echo "Warning: cleanup failed, daily prune will catch it"
+          fi

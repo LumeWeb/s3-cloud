@@ -1,0 +1,199 @@
+# CI workflow for Vultr builds.
+# Triggered by packer-ci.yml dispatcher via workflow_dispatch (gh workflow run --ref).
+# Builds a snapshot, validates it, cleans up on failure.
+# Snapshots are kept until PR close (dispatcher sends cleanup-mode=close) or
+# push-to-develop (ephemeral, cleaned inline).
+
+name: CI Vultr
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot-prefix:
+        description: 'Snapshot prefix (e.g. pinner-s3-vultr-pr-123- or pinner-s3-vultr-ci-)'
+        required: true
+        type: string
+      cleanup-mode:
+        description: 'Cleanup mode: none, inline (delete after validate), or close (delete all PR snapshots)'
+        required: false
+        default: 'inline'
+        type: choice
+        options:
+          - 'inline'
+          - 'none'
+          - 'close'
+      pr-number:
+        description: 'PR number (for close cleanup)'
+        required: false
+        type: string
+
+concurrency:
+  group: ci-vultr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-validate:
+    if: inputs.cleanup-mode != 'close'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: vultr
+      SNAPSHOT_PREFIX: ${{ inputs.snapshot-prefix }}
+      CLEANUP_MODE: ${{ inputs.cleanup-mode }}
+      PR_NUMBER: ${{ inputs.pr-number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # base64 decoded
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Install vultr-cli
+        run: |
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64)  ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+          esac
+          ASSET=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/vultr/vultr-cli/releases/latest" \
+            | python3 -c "import json,sys; r=json.load(sys.stdin); a=[x['browser_download_url'] for x in r['assets'] if x['name'].endswith(f'${OS}_${ARCH}.tar.gz')]; print(a[0] if a else '')")
+          if [ -z "$ASSET" ]; then
+            echo "ERROR: No vultr-cli asset found for ${OS}_${ARCH}"
+            exit 1
+          fi
+          curl -fsSL "$ASSET" | tar xz -C /usr/local/bin
+          touch ~/.vultr-cli.yaml
+          vultr-cli version
+
+      - name: Upload SSH public key to Vultr
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+        run: |
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
+          PUB_KEY=$(cat ~/.ssh/id_ed25519.pub)
+          KEY_ID=$(vultr-cli ssh-key list --output=json | jq -r ".ssh_keys[] | select(.name == \"ci-build-key\") | .id" 2>/dev/null || echo "")
+          if [ -z "$KEY_ID" ]; then
+            KEY_ID=$(vultr-cli ssh-key create --name="ci-build-key" --key="$PUB_KEY" --output=json | jq -r '.ssh_key.id')
+            echo "Created Vultr SSH key: $KEY_ID"
+          else
+            vultr-cli ssh-key update "$KEY_ID" --key="$PUB_KEY" || true
+            echo "Updated Vultr SSH key: $KEY_ID"
+          fi
+          echo "VULTR_SSH_KEY_ID=$KEY_ID" >> "$GITHUB_ENV"
+
+      - name: Build snapshot
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+          PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          make build SNAPSHOT_PREFIX="$SNAPSHOT_PREFIX"
+
+      - name: Validate snapshot
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+        run: |
+          cd deploy/"$VENDOR"
+          make validate
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-vultr
+          path: deploy/vultr/manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup on success (inline mode)
+        if: success() && inputs.cleanup-mode == 'inline'
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            echo "==> Cleaning up snapshot (inline mode)..."
+            make cleanup-snapshot || echo "Warning: manifest cleanup failed, daily prune will catch it"
+          fi
+
+      - name: Cleanup on failure
+        if: failure()
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            echo "==> Cleaning up snapshot from failed build/validate..."
+            make cleanup-snapshot || echo "Warning: manifest cleanup failed, daily prune will catch it"
+          fi
+          python3 scripts/prune-snapshots.py --max-age-hours 0 --prefix "$SNAPSHOT_PREFIX" 2>/dev/null \
+            || echo "Warning: prune fallback failed, daily prune will catch it"
+
+  cleanup:
+    if: inputs.cleanup-mode == 'close'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VENDOR: vultr
+      PR_NUMBER: ${{ inputs.pr-number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Install vultr-cli
+        run: |
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64)  ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+          esac
+          ASSET=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/vultr/vultr-cli/releases/latest" \
+            | python3 -c "import json,sys; r=json.load(sys.stdin); a=[x['browser_download_url'] for x in r['assets'] if x['name'].endswith(f'${OS}_${ARCH}.tar.gz')]; print(a[0] if a else '')")
+          if [ -z "$ASSET" ]; then
+            echo "ERROR: No vultr-cli asset found for ${OS}_${ARCH}"
+            exit 1
+          fi
+          curl -fsSL "$ASSET" | tar xz -C /usr/local/bin
+          touch ~/.vultr-cli.yaml
+          vultr-cli version
+
+      - name: Delete PR snapshots
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR number, skipping cleanup."
+            exit 0
+          fi
+          PREFIX="pinner-s3-vultr-pr-${PR_NUMBER}-"
+          echo "==> Cleaning up snapshots with prefix: $PREFIX"
+          cd deploy/vultr
+          python3 scripts/prune-snapshots.py --max-age-hours 0 --prefix "$PREFIX"

@@ -6,6 +6,20 @@ set -euo pipefail
 echo "=== S3 Server Packer Provisioner ==="
 echo "Installing Docker Engine + docker-compose-plugin..."
 
+# Wait for any in-progress apt operations to finish (unattended-upgrades,
+# previous provisioner's apt-get upgrade, etc.) before acquiring the lock.
+echo "Waiting for apt/dpkg locks to be released..."
+for i in $(seq 1 60); do
+    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+       fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        echo "  apt lock held (attempt $i/60), waiting 5s..."
+        sleep 5
+    else
+        echo "  apt locks free, proceeding."
+        break
+    fi
+done
+
 # Docker convenience script handles apt/dnf package setup
 curl -fsSL https://get.docker.com | sh
 systemctl enable docker
