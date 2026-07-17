@@ -20,6 +20,10 @@ s3-cloud: multi-platform deployment configs for [s3-server](https://github.com/L
 s3-cloud/
 ├── docker-compose.yml          # Standalone deployment (s3-server + updater sidecar)
 ├── deploy/                     # Per-platform configs (added incrementally)
+│   ├── AGENTS.md               # Platform-agnostic deployment guide
+│   ├── shared/                 # Provider-agnostic scripts and files
+│   ├── digitalocean/           # DO Marketplace deployment
+│   └── vultr/                  # Vultr Marketplace deployment
 ├── packer/
 │   └── scripts/
 │       └── install-s3-server.sh  # Shared VM provisioning script
@@ -29,8 +33,23 @@ s3-cloud/
 ├── docs/
 │   └── platform-support.md     # Platform support matrix
 └── .github/workflows/
+    ├── packer-ci.yml           # CI dispatcher: detect vendors → gh workflow run per-vendor
+    ├── packer-ci-digitalocean.yml  # CI: DO build + validate + cleanup (ephemeral)
+    ├── packer-ci-vultr.yml     # CI: Vultr build + validate + cleanup (ephemeral)
+    ├── packer-release.yml      # Release dispatcher: resolve vendors → gh workflow run per-vendor
+    ├── packer-release-digitalocean.yml  # Release: DO build + validate + submit
+    ├── packer-release-vultr.yml    # Release: Vultr build + validate + submit
+    ├── prune-resources.yml     # Daily cron: prune orphaned snapshots + instances
     └── docker-publish.yml      # Sidecar multi-arch CI build
 ```
+
+## Healthcheck
+
+The Docker healthcheck in `docker-compose.yml` must use `wget -q -O /dev/null` (GET), NOT `wget --spider` (HEAD). The `/_panel/healthz` endpoint in s3-server is registered as GET-only in Echo, so HEAD returns 405 Method Not Allowed and the container is marked unhealthy.
+
+## Prune Scripts
+
+Each vendor has two separate prune scripts: `prune-snapshots.py` and `prune-instances.py`. Each requires `--prefix` (no default). Never combine snapshot and instance deletion in a single script — this was the source of multiple CI bugs. Instance names don't contain PR numbers, so instance pruning uses vendor-wide prefix + age filtering.
 
 ## Sidecar Flag-File API
 

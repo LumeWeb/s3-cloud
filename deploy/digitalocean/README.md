@@ -214,14 +214,15 @@ cat /state/updater.log
 | `template.pkr.hcl` | Packer template (DO builder, manifest post-processor) |
 | `Makefile` | Build, validate, submit, all targets |
 | `submit.py` | Vendor Portal API submission (reads manifest.json) |
-| `files/etc/update-motd.d/99-one-click` | MOTD shown on first SSH login |
-| `files/var/lib/cloud/scripts/per-instance/001_onboot` | Cloud-init per-instance boot script |
-| `scripts/014-ufw-s3.sh` | Firewall configuration (ufw) |
-| `scripts/020-application-tag.sh` | Application metadata tag |
-| `scripts/018-force-ssh-logout.sh` | SSH lockout during first-boot setup |
-| `scripts/900-cleanup.sh` | Image cleanup (logs, keys, disk zeroing) |
+| `shared/files/etc/update-motd.d/99-one-click` | MOTD shown on first SSH login - shared across vendors |
+| `shared/files/var/lib/cloud/scripts/per-instance/001_onboot` | Cloud-init boot script - shared across vendors |
+| `shared/scripts/014-ufw-s3.sh` | Firewall configuration (ufw) - shared across vendors |
+| `shared/scripts/018-force-ssh-logout.sh` | SSH lockout during first-boot setup - shared across vendors |
+| `scripts/020-application-tag.sh` | Application metadata tag (DO-specific) |
+| `scripts/900-cleanup.sh` | Image cleanup (logs, keys, disk zeroing, droplet-agent purge) |
 | `scripts/validate.sh` | Temp Droplet validation via doctl + img-check |
-| `MARKETPLACE_README.md` | Marketplace listing text (static, no version) |
+| `scripts/prune-snapshots.py` | Prune old DO snapshots by prefix (used by CI cleanup / daily cron) |
+| `scripts/prune-instances.py` | Prune old DO droplets by prefix (used by daily cron) |
 | `README.md` | This file |
 
 ## Shared Provisioner

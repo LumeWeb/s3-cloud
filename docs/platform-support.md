@@ -13,6 +13,7 @@ Deployment targets for s3-server. All use the same Docker image (`ghcr.io/lumewe
 | Platform | Install | Update | Difficulty | Docs |
 |---|---|---|---|---|
 | DigitalOcean | 1-Click Droplet or Packer snapshot | Sidecar (auto-update ON by default) | Easy | [README](../deploy/digitalocean/README.md) |
+| Vultr | Marketplace App or Packer snapshot | Sidecar (auto-update ON by default) | Easy | [README](../deploy/vultr/README.md) |
 
 ## PaaS
 

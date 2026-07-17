@@ -1,32 +1,21 @@
 packer {
   required_plugins {
-    digitalocean = {
-      source  = "github.com/digitalocean/digitalocean"
-      version = ">= 1.3.0"
+    vultr = {
+      source  = "github.com/vultr/vultr"
+      version = ">= 2.5.0"
     }
   }
 }
 
-variable "do_api_token" {
+variable "vultr_api_key" {
   type      = string
-  default   = "${env("DIGITALOCEAN_API_TOKEN")}"
+  default   = env("VULTR_API_KEY")
   sensitive = true
 }
 
-variable "do_region" {
+variable "vultr_region" {
   type    = string
-  default = "nyc3"
-}
-
-variable "do_ssh_key_id" {
-  type      = string
-  default   = "${env("DO_SSH_KEY_ID")}"
-  sensitive = true
-}
-
-variable "do_ssh_private_key_file" {
-  type    = string
-  default = "${env("HOME")}/.ssh/id_ed25519"
+  default = "ewr"
 }
 
 variable "application_name" {
@@ -41,23 +30,24 @@ variable "application_version" {
 
 variable "snapshot_prefix" {
   type    = string
-  default = "pinner-s3-do-"
+  default = "pinner-s3-vultr-"
 }
 
-source "digitalocean" "s3-server" {
-  api_token            = var.do_api_token
-  image                = "ubuntu-22-04-x64"
-  size                 = "s-1vcpu-1gb"
-  region               = var.do_region
+source "vultr" "s3-server" {
+  api_key              = var.vultr_api_key
+  os_id                = 1743
+  plan_id              = "vc2-1c-2gb"
+  region_id            = var.vultr_region
   ssh_username         = "root"
-  droplet_name         = "pinner-s3-do-builder"
-  snapshot_name        = "${var.snapshot_prefix}{{timestamp}}"
-  ssh_key_id           = var.do_ssh_key_id
-  ssh_private_key_file = var.do_ssh_private_key_file
+  state_timeout        = "25m"
+  snapshot_description = "${var.snapshot_prefix}{{timestamp}}"
+  instance_label       = "pinner-s3-vultr-builder"
+  hostname             = "s3-server-build"
+  tags                 = ["s3-server", "marketplace", "packer"]
 }
 
 build {
-  sources = ["source.digitalocean.s3-server"]
+  sources = ["source.vultr.s3-server"]
 
   # Wait for cloud-init to finish before provisioning
   provisioner "shell" {
@@ -108,11 +98,10 @@ build {
     destination = "/var/lib/cloud/scripts/per-instance/001_onboot"
   }
 
-  # 014-ufw and 018-force-ssh-logout are shared; 020-application-tag is DO-specific
+  # Configure firewall and force SSH logout, then make boot script executable
+  # 014-ufw and 018-force-ssh-logout are shared
   provisioner "shell" {
     environment_vars = [
-      "application_name=${var.application_name}",
-      "application_version=${var.application_version}",
       "DEBIAN_FRONTEND=noninteractive",
       "LC_ALL=C",
       "LANG=en_US.UTF-8",
@@ -120,7 +109,6 @@ build {
     ]
     scripts = [
       "${path.root}/../shared/scripts/014-ufw-s3.sh",
-      "scripts/020-application-tag.sh",
       "${path.root}/../shared/scripts/018-force-ssh-logout.sh",
     ]
   }
@@ -132,7 +120,7 @@ build {
     ]
   }
 
-  # Run DO cleanup script last (clears logs, SSH keys, bash history, zeros disk, purges droplet-agent)
+  # Run cleanup script last (clears logs, SSH keys, bash history, zeros disk)
   provisioner "shell" {
     script = "scripts/900-cleanup.sh"
   }

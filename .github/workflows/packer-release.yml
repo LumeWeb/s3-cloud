@@ -1,6 +1,12 @@
-# Marketplace release: build snapshot, validate, submit to Vendor Portal.
-# Build and submit are separate jobs so a build can succeed independently
-# of whether the marketplace listing is ready to update.
+# Marketplace release dispatcher: resolves target vendors and fans out to
+# per-vendor release workflows.
+#
+# Each per-vendor workflow (packer-release-<vendor>.yml) handles its own
+# build → validate → submit pipeline independently. One vendor failing
+# does NOT affect the other.
+#
+# Release snapshots use the bare prefix (pinner-s3-<vendor>-<timestamp>)
+# and are persistent (not cleaned up by CI).
 
 name: Marketplace Release
 
@@ -11,12 +17,16 @@ on:
   workflow_dispatch:
     inputs:
       vendor:
-        description: 'Target vendor directory'
+        description: 'Target vendor (digitalocean, vultr, or all)'
         required: false
-        default: 'digitalocean'
-        type: string
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'digitalocean'
+          - 'vultr'
       reason:
-        description: 'Reason for update (shown in Vendor Portal)'
+        description: 'Reason for update (shown in Vendor Portal / Console)'
         required: false
         default: 'Automated release'
         type: string
@@ -26,7 +36,6 @@ on:
         type: string
 
 env:
-  VENDOR: ${{ github.event.inputs.vendor || 'digitalocean' }}
   RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
   RELEASE_REASON: ${{ github.event.inputs.reason || 'Automated release' }}
 
@@ -35,96 +44,69 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-validate:
+  resolve-vendors:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    outputs:
+      vendors: ${{ steps.resolve.outputs.vendors }}
+      version: ${{ steps.resolve.outputs.version }}
+      reason: ${{ steps.resolve.outputs.reason }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Setup Packer
-        uses: hashicorp/setup-packer@v3
-        with:
-          version: latest
-
-      - name: Install doctl
-        uses: digitalocean/action-doctl@v2
-        with:
-          token: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
-
-      - name: Configure SSH key
-        env:
-          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+      - name: Resolve vendor list and release params
+        id: resolve
         run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
-            : # Successfully decoded as base64
+          INPUT="${{ github.event.inputs.vendor || 'all' }}"
+          if [ "$INPUT" = "all" ]; then
+            echo 'vendors=["digitalocean","vultr"]' >> "$GITHUB_OUTPUT"
           else
-            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+            echo "vendors=[\"$INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H digitalocean.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "reason=${RELEASE_REASON}" >> "$GITHUB_OUTPUT"
 
-      - name: Build snapshot
-        env:
-          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
-          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
-        run: |
-          cd deploy/"$VENDOR"
-          make build
-
-      - name: Validate snapshot
-        env:
-          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
-          DO_SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
-        run: |
-          cd deploy/"$VENDOR"
-          make validate
-
-      - name: Upload manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-manifest
-          path: deploy/${{ env.VENDOR }}/manifest.json
-          retention-days: 7
-
-  submit:
-    needs: build-and-validate
+  dispatch-digitalocean:
+    needs: resolve-vendors
+    if: contains(needs.resolve-vendors.outputs.vendors, 'digitalocean')
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      DO_VENDOR_APP_ID: ${{ secrets.DO_VENDOR_APP_ID }}
-      DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
-      - name: Download manifest
-        uses: actions/download-artifact@v4
-        with:
-          name: release-manifest
-          path: deploy/${{ env.VENDOR }}/
-
-      - name: Submit to Vendor Portal
+      - name: Dispatch DigitalOcean Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.ref_name }}
+          VERSION: ${{ needs.resolve-vendors.outputs.version }}
+          REASON: ${{ needs.resolve-vendors.outputs.reason }}
         run: |
-          cd deploy/"$VENDOR"
-          # Strip leading 'v' from tag names (v1.2.3 -> 1.2.3)
-          CLEAN_VERSION="${RELEASE_VERSION#v}"
-          if ! printf '%s' "$CLEAN_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Invalid version string: $CLEAN_VERSION"
-            exit 1
-          fi
-          make submit DRY_RUN=false VERSION="$CLEAN_VERSION" REASON="$RELEASE_REASON"
+          gh workflow run packer-release-digitalocean.yml \
+            --ref "$REF" \
+            -f version="$VERSION" \
+            -f reason="$REASON"
+          echo "Dispatched Release DigitalOcean on ref $REF"
 
-  job-summary:
-    needs: [build-and-validate, submit]
+  dispatch-vultr:
+    needs: resolve-vendors
+    if: contains(needs.resolve-vendors.outputs.vendors, 'vultr')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Dispatch Vultr Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.ref_name }}
+          VERSION: ${{ needs.resolve-vendors.outputs.version }}
+          REASON: ${{ needs.resolve-vendors.outputs.reason }}
+        run: |
+          gh workflow run packer-release-vultr.yml \
+            --ref "$REF" \
+            -f version="$VERSION" \
+            -f reason="$REASON"
+          echo "Dispatched Release Vultr on ref $REF"
+
+  summary:
+    needs: [resolve-vendors, dispatch-digitalocean, dispatch-vultr]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -135,9 +117,8 @@ jobs:
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
-            echo "| Vendor | $VENDOR |"
-            echo "| Version | $RELEASE_VERSION |"
-            echo "| Reason | $RELEASE_REASON |"
-            echo "| Build + Validate | ${{ needs.build-and-validate.result }} |"
-            echo "| Submit | ${{ needs.submit.result }} |"
+            echo "| Version | ${{ needs.resolve-vendors.outputs.version }} |"
+            echo "| Reason | ${{ needs.resolve-vendors.outputs.reason }} |"
+            echo "| DigitalOcean | ${{ needs.dispatch-digitalocean.result }} |"
+            echo "| Vultr | ${{ needs.dispatch-vultr.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
