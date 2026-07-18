@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       vendor:
-        description: 'Target vendor (digitalocean, vultr, or all)'
+        description: 'Target vendor (digitalocean, vultr, aws, or all)'
         required: false
         default: 'all'
         type: choice
@@ -25,6 +25,7 @@ on:
           - 'all'
           - 'digitalocean'
           - 'vultr'
+          - 'aws'
       reason:
         description: 'Reason for update (shown in Vendor Portal / Console)'
         required: false
@@ -56,7 +57,7 @@ jobs:
         run: |
           INPUT="${{ github.event.inputs.vendor || 'all' }}"
           if [ "$INPUT" = "all" ]; then
-            echo 'vendors=["digitalocean","vultr"]' >> "$GITHUB_OUTPUT"
+            echo 'vendors=["digitalocean","vultr","aws"]' >> "$GITHUB_OUTPUT"
           else
             echo "vendors=[\"$INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
@@ -105,8 +106,17 @@ jobs:
             -f reason="$REASON"
           echo "Dispatched Release Vultr on ref $REF"
 
+  dispatch-aws:
+    needs: resolve-vendors
+    if: contains(needs.resolve-vendors.outputs.vendors, 'aws')
+    uses: ./.github/workflows/packer-release-aws.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.resolve-vendors.outputs.version }}
+      reason: ${{ needs.resolve-vendors.outputs.reason }}
+
   summary:
-    needs: [resolve-vendors, dispatch-digitalocean, dispatch-vultr]
+    needs: [resolve-vendors, dispatch-digitalocean, dispatch-vultr, dispatch-aws]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -121,4 +131,5 @@ jobs:
             echo "| Reason | ${{ needs.resolve-vendors.outputs.reason }} |"
             echo "| DigitalOcean | ${{ needs.dispatch-digitalocean.result }} |"
             echo "| Vultr | ${{ needs.dispatch-vultr.result }} |"
+            echo "| AWS | ${{ needs.dispatch-aws.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"

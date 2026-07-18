@@ -7,3 +7,8 @@ Thumbs.db
 .secrets
 .env
 .ci-ssh-key
+
+# Python
+__pycache__/
+*.pyc
+manifest.json

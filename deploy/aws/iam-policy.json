@@ -1,0 +1,112 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PackerAMI",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeImages",
+        "ec2:RegisterImage",
+        "ec2:DeregisterImage",
+        "ec2:CreateImage",
+        "ec2:DescribeImageAttribute",
+        "ec2:ModifyImageAttribute",
+        "ec2:ResetImageAttribute",
+        "ec2:CreateTags",
+        "ec2:DescribeTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PackerSnapshots",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSnapshot",
+        "ec2:DeleteSnapshot",
+        "ec2:DescribeSnapshots",
+        "ec2:ModifySnapshotAttribute",
+        "ec2:ResetSnapshotAttribute"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PackerInstances",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeInstanceTypes",
+        "ec2:StopInstances",
+        "ec2:StartInstances",
+        "ec2:GetPasswordData"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PackerVolumes",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVolume",
+        "ec2:DeleteVolume",
+        "ec2:DetachVolume",
+        "ec2:AttachVolume",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVolumeStatus",
+        "ec2:ModifyVolumeAttribute"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PackerNetworking",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeRegions",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:DeleteSecurityGroup",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeAvailabilityZones"
+      ],
+      "Resource": "*"
+    },
+        {
+      "Sid": "PackerKeys",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeKeyPairs",
+        "ec2:CreateKeyPair",
+        "ec2:DeleteKeyPair",
+        "ec2:ImportKeyPair"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "SerialConsole",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:SerialConsoleAccess",
+        "ec2:GetSerialConsole",
+        "ec2:SendSerialConsoleSSHPublicKey"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

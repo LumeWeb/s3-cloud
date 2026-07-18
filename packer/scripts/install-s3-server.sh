@@ -185,11 +185,11 @@ Pinner.xyz S3 Server - Private, zero-knowledge self-hosted S3-compatible object 
 Auto-update is **enabled by default**. The update sidecar checks for new
 container images every 6 hours. To disable:
 ```bash
-docker exec s3-deployment-updater-1 touch /state/autoupdate.disabled
+touch /state/autoupdate.disabled
 ```
 Re-enable with:
 ```bash
-docker exec s3-deployment-updater-1 rm /state/autoupdate.disabled
+rm /state/autoupdate.disabled
 ```
 No restart needed.
 

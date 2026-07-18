@@ -1,0 +1,141 @@
+# Release workflow for AWS marketplace.
+# Triggered by packer-release.yml dispatcher via workflow_dispatch (gh workflow run --ref).
+# Builds an AMI, validates it, submits to the AWS Marketplace.
+
+name: Release AWS
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0)'
+        required: true
+        type: string
+      reason:
+        description: 'Release reason (e.g. initial-release)'
+        required: false
+        default: 'initial-release'
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0)'
+        required: true
+        type: string
+      reason:
+        description: 'Release reason (e.g. initial-release)'
+        required: false
+        default: 'initial-release'
+        type: string
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VENDOR: aws
+      SNAPSHOT_PREFIX: pinner-s3-aws-
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # base64 decoded
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Build AMI
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          make build SNAPSHOT_PREFIX="$SNAPSHOT_PREFIX" VERSION="$VERSION"
+
+      - name: Validate AMI
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          cd deploy/"$VENDOR"
+          make validate
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-aws-release
+          path: deploy/aws/manifest.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  submit:
+    needs: build-and-validate
+    if: success()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Download manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: manifest-aws-release
+          path: deploy/aws/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Submit to AWS Marketplace
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          VERSION: ${{ inputs.version }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          cd deploy/aws
+          if [ -f manifest.json ]; then
+            echo "==> Submitting AMI to AWS Marketplace..."
+            python3 submit.py --manifest manifest.json --version "$VERSION" --reason "$REASON"
+          else
+            echo "ERROR: manifest.json not found. Cannot submit."
+            exit 1
+          fi

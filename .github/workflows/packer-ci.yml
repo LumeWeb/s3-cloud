@@ -40,7 +40,7 @@ on:
   workflow_dispatch:
     inputs:
       vendor:
-        description: 'Vendor to build (digitalocean, vultr, or all)'
+        description: 'Vendor to build (digitalocean, vultr, aws, or all)'
         required: false
         default: 'all'
         type: choice
@@ -48,6 +48,7 @@ on:
           - 'all'
           - 'digitalocean'
           - 'vultr'
+          - 'aws'
       skip-cleanup:
         description: 'Skip cleanup after build (keep snapshot for manual testing)'
         required: false
@@ -56,6 +57,10 @@ on:
         options:
           - 'true'
           - 'false'
+      rescue-password:
+        description: 'Set root password for serial console rescue access (AWS debug only)'
+        required: false
+        type: string
 
 concurrency:
   group: packer-ci-${{ github.ref }}
@@ -82,7 +87,7 @@ jobs:
         run: |
           # PR close: cleanup all vendors
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_EVENT_ACTION" = "closed" ]; then
-            echo 'vendors=["digitalocean","vultr"]' >> "$GITHUB_OUTPUT"
+            echo 'vendors=["digitalocean","vultr","aws"]' >> "$GITHUB_OUTPUT"
             echo "is-closed=true" >> "$GITHUB_OUTPUT"
             echo "Detected vendors (PR close): all"
             exit 0
@@ -93,7 +98,7 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             INPUT="${{ github.event.inputs.vendor }}"
             if [ "$INPUT" = "all" ]; then
-              echo 'vendors=["digitalocean","vultr"]' >> "$GITHUB_OUTPUT"
+              echo 'vendors=["digitalocean","vultr","aws"]' >> "$GITHUB_OUTPUT"
             else
               echo "vendors=[\"$INPUT\"]" >> "$GITHUB_OUTPUT"
             fi
@@ -116,6 +121,9 @@ jobs:
           if echo "$CHANGED" | grep -q '^deploy/vultr/'; then
             VENDORS="${VENDORS}vultr "
           fi
+          if echo "$CHANGED" | grep -q '^deploy/aws/'; then
+            VENDORS="${VENDORS}aws "
+          fi
 
           # Shared files affect ALL vendors — add them additively.
           if echo "$CHANGED" | grep -qE '^(packer/scripts/|deploy/shared/|docker-compose\.yml|sidecar/)'; then
@@ -124,6 +132,9 @@ jobs:
             fi
             if ! echo "$VENDORS" | grep -q 'vultr'; then
               VENDORS="${VENDORS}vultr "
+            fi
+            if ! echo "$VENDORS" | grep -q 'aws'; then
+              VENDORS="${VENDORS}aws "
             fi
           fi
 
@@ -210,6 +221,7 @@ jobs:
           additional_files: >-
             deploy/${{ matrix.vendor }}/scripts/900-cleanup.sh
             deploy/${{ matrix.vendor }}/scripts/validate.sh
+            deploy/${{ matrix.vendor }}/scripts/001_provision.sh
 
       - name: Shellcheck (DO application-tag, digitalocean only)
         if: matrix.vendor == 'digitalocean'
@@ -227,6 +239,12 @@ jobs:
             deploy/shared/scripts/lib/compliance-checks.sh
             deploy/shared/files/var/lib/cloud/scripts/per-instance/001_onboot
             deploy/shared/files/etc/update-motd.d/99-one-click
+
+      - name: Shellcheck (repo-level AWS validator)
+        if: matrix.vendor == 'aws'
+        uses: ludeeus/action-shellcheck@master
+        with:
+          additional_files: 'scripts/validate-aws.sh'
 
       - name: Python compile check
         run: python3 -m py_compile deploy/${{ matrix.vendor }}/submit.py deploy/${{ matrix.vendor }}/scripts/prune-snapshots.py deploy/${{ matrix.vendor }}/scripts/prune-instances.py
@@ -330,3 +348,15 @@ jobs:
             -f cleanup-mode="$CLEANUP_MODE" \
             -f pr-number="$PR_NUMBER"
           echo "Dispatched CI Vultr on ref $REF"
+
+  dispatch-aws:
+    needs: [detect-vendors, check-permissions]
+    if: always() && !cancelled() && needs.check-permissions.outputs.authorized == 'true' && contains(needs.detect-vendors.outputs.vendors, 'aws') && needs.detect-vendors.outputs.is-closed != 'true'
+    uses: ./.github/workflows/packer-ci-aws.yml
+    secrets: inherit
+    with:
+      snapshot-prefix: pinner-s3-aws-pr-${{ github.event.pull_request.number }}-
+      cleanup-mode: none
+      pr-number: ${{ github.event.pull_request.number }}
+      rescue-password: ${{ github.event.inputs.rescue-password }}
+
