@@ -12,31 +12,21 @@ Deployment targets for s3-server. All use the same Docker image (`ghcr.io/lumewe
 
 | Platform | Install | Update | Difficulty | Docs |
 |---|---|---|---|---|
-| DigitalOcean | 1-Click Droplet or Packer snapshot | Sidecar (auto-update ON by default) | Easy | [README](../deploy/digitalocean/README.md) |
-| Vultr | Marketplace App or Packer snapshot | Sidecar (auto-update ON by default) | Easy | [README](../deploy/vultr/README.md) |
+| DigitalOcean 1-Click | Droplet from Marketplace image | Auto-update sidecar | Medium | [deploy/digitalocean/README.md](../deploy/digitalocean/README.md) |
+| Vultr 1-Click | VPS from Marketplace image | Auto-update sidecar | Medium | [deploy/vultr/README.md](../deploy/vultr/README.md) |
+| AWS EC2 / CloudFormation | EC2 from Marketplace AMI | Auto-update sidecar | Medium | [deploy/aws/README.md](../deploy/aws/README.md) |
 
-## PaaS
+## Platform Feature Parity
 
-_Platform configs will be added here as providers are onboarded._
+| Feature | Self-Hosted | DigitalOcean | Vultr | AWS |
+|---|---|---|---|---|
+| Docker Compose stack | ✅ | ✅ | ✅ | ✅ |
+| Auto-update sidecar | Manual | ✅ | ✅ | ✅ |
+| HTTPS/S3 domain configuration | Manual | Manual | Manual | Manual |
+| CloudFormation deployment | ❌ | ❌ | ❌ | ✅ |
+| Firewall configured | Manual | ✅ (ufw) | ✅ (ufw) | ✅ (Security Group + ufw) |
 
-## Kubernetes
+## Notes
 
-_Platform configs will be added here as providers are onboarded._
-
-## Update Mechanism Summary
-
-| Environment | Update Model | Panel UI | Sidecar |
-|---|---|---|---|
-| Docker Compose | Sidecar in compose | Auto-update toggle + manual "update now" button | Yes |
-| Cloud VMs | Sidecar (Packer pre-installed) | Auto-update toggle + manual "update now" button | Yes |
-| PaaS | Platform-native | None (platform manages updates) | No |
-| Kubernetes | Manual helm upgrade / redeploy | Read-only status badge (no toggle/button) | No |
-
-## Architecture
-
-- **Image**: `ghcr.io/lumeweb/s3-server:latest` (amd64 + arm64)
-- **Updater image**: `ghcr.io/lumeweb/s3-server-updater:latest` (multi-arch, built by this repo's CI)
-- **Binary**: `s3-server` (Go, SQLite, port 80)
-- **Update sidecar**: polls GHCR `:latest` every 6h, compares digest, recreates container on change (~170 lines bash)
-- **Sidecar flag files** (shared `/state` volume): `autoupdate.enabled`, `autoupdate.disabled`, `update.trigger`, `last-digest`, `updater.log`
-- No `os/exec` in s3-server, no tini, no Docker-in-Docker, no Watchtower
+- AWS requires the AMI to be published to AWS Marketplace and shared with the AWS Marketplace service account (`679593333241`) before buyers can deploy it. The CloudFormation template in `deploy/aws/cloudformation.template.json` references the AMI ID via an `AWS::EC2::Image::Id` parameter.
+- All Marketplace images disable root login and password authentication. Administrative access is via the configured user (`root` on DigitalOcean, `root` on Vultr, or `ubuntu` with optional SSH on AWS).

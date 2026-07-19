@@ -1,0 +1,237 @@
+# CI workflow for AWS builds.
+# Triggered by packer-ci.yml dispatcher via workflow_dispatch (gh workflow run --ref).
+# Builds an AMI, validates it, cleans up on failure.
+# AMIs are kept until PR close (dispatcher sends cleanup-mode=close) or
+# push-to-develop (ephemeral, cleaned inline).
+
+name: CI AWS
+
+on:
+  workflow_call:
+    inputs:
+      snapshot-prefix:
+        description: 'Snapshot prefix (e.g. pinner-s3-aws-pr-123- or pinner-s3-aws-ci-)'
+        required: true
+        type: string
+      cleanup-mode:
+        description: 'Cleanup mode: none, inline (delete after validate), or close (delete all PR AMIs)'
+        required: false
+        default: 'inline'
+        type: string
+      pr-number:
+        description: 'PR number (for close cleanup)'
+        required: false
+        type: string
+      rescue-password:
+        description: 'Set root password for serial console rescue access (debug only, never for release)'
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      snapshot-prefix:
+        description: 'Snapshot prefix (e.g. pinner-s3-aws-pr-123- or pinner-s3-aws-ci-)'
+        required: true
+        type: string
+      cleanup-mode:
+        description: 'Cleanup mode: none, inline (delete after validate), or close (delete all PR AMIs)'
+        required: false
+        default: 'inline'
+        type: choice
+        options:
+          - 'inline'
+          - 'none'
+          - 'close'
+      pr-number:
+        description: 'PR number (for close cleanup)'
+        required: false
+        type: string
+      rescue-password:
+        description: 'Set root password for serial console rescue access (debug only, never for release)'
+        required: false
+        type: string
+
+concurrency:
+  group: ci-aws-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-validate:
+    if: inputs.cleanup-mode != 'close'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VENDOR: aws
+      SNAPSHOT_PREFIX: ${{ inputs.snapshot-prefix }}
+      CLEANUP_MODE: ${{ inputs.cleanup-mode }}
+      PR_NUMBER: ${{ inputs.pr-number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH key
+        env:
+          CI_BUILD_SSH_KEY: ${{ secrets.CI_BUILD_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if echo "$CI_BUILD_SSH_KEY" | base64 -d > ~/.ssh/id_ed25519 2>/dev/null; then
+            : # base64 decoded
+          else
+            echo "$CI_BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Discover VPC and Subnet
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          echo "==> Discovering default VPC..."
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+          if [ "$VPC_ID" = "None" ] || [ -z "$VPC_ID" ]; then
+            echo "Error: No default VPC found. Please create a default VPC or specify VPC_ID explicitly."
+            exit 1
+          fi
+          echo "VPC_ID=$VPC_ID"
+
+          echo "==> Discovering public subnet in AZ that supports t3.small..."
+          # Query subnets and their AZs, then filter out us-east-1e (no t3 support)
+          SUBNET_INFO=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=map-public-ip-on-launch,Values=true" \
+            --query 'Subnets[*].[SubnetId,AvailabilityZone]' --output text)
+
+          SUBNET_ID=""
+          while read -r sub az; do
+            if [ "$az" != "us-east-1e" ]; then
+              SUBNET_ID="$sub"
+              echo "Found subnet $SUBNET_ID in AZ $az"
+              break
+            fi
+          done <<< "$SUBNET_INFO"
+
+          if [ -z "$SUBNET_ID" ]; then
+            echo "Error: No suitable public subnet found outside us-east-1e."
+            exit 1
+          fi
+
+          echo "VPC_ID=$VPC_ID" >> "$GITHUB_ENV"
+          echo "SUBNET_ID=$SUBNET_ID" >> "$GITHUB_ENV"
+
+      - name: Build AMI
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          PKR_VAR_snapshot_prefix: ${{ steps.config.outputs.snapshot-prefix }}
+          PKR_VAR_vpc_id: ${{ steps.vpc.outputs.vpc_id }}
+          PKR_VAR_subnet_id: ${{ steps.vpc.outputs.subnet_id }}
+        run: |
+          cd deploy/"$VENDOR"
+          make build SNAPSHOT_PREFIX="$SNAPSHOT_PREFIX" VPC_ID="$VPC_ID" SUBNET_ID="$SUBNET_ID"
+
+      - name: Validate AMI
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          VPC_ID: ${{ env.VPC_ID }}
+          SUBNET_ID: ${{ env.SUBNET_ID }}
+          RESCUE_PASSWORD: ${{ github.event.inputs.rescue-password }}
+        run: |
+          cd deploy/"$VENDOR"
+          make validate VPC_ID="$VPC_ID" SUBNET_ID="$SUBNET_ID"
+
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-aws
+          path: deploy/aws/manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup on success (inline mode)
+        if: success() && inputs.cleanup-mode == 'inline'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            echo "==> Cleaning up AMI (inline mode)..."
+            make cleanup-snapshot || echo "Warning: manifest cleanup failed, daily prune will catch it"
+          fi
+
+      - name: Cleanup on failure
+        if: failure() && github.event.inputs.skip-cleanup == 'false'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd deploy/"$VENDOR"
+          if [ -f manifest.json ]; then
+            echo "==> Cleaning up AMI from failed build/validate..."
+            make cleanup-snapshot || echo "Warning: manifest cleanup failed, daily prune will catch it"
+          fi
+          # Prune any orphaned AMIs with this prefix
+          python3 scripts/prune-snapshots.py --max-age-hours 0 --prefix "$SNAPSHOT_PREFIX" 2>/dev/null \
+            || echo "Warning: prune fallback failed, daily prune will catch it"
+
+  cleanup:
+    if: inputs.cleanup-mode == 'close'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VENDOR: aws
+      PR_NUMBER: ${{ inputs.pr-number }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Delete PR AMIs
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR number, skipping cleanup."
+            exit 0
+          fi
+          PREFIX="pinner-s3-aws-pr-${PR_NUMBER}-"
+          echo "==> Cleaning up AMIs with prefix: $PREFIX"
+          cd deploy/aws
+          python3 scripts/prune-snapshots.py --max-age-hours 0 --prefix "$PREFIX"

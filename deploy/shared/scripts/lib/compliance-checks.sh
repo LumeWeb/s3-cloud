@@ -8,7 +8,14 @@
 # so no per-vendor SSH configuration is needed.
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
+SSH_USER="${SSH_USER:-root}"
 SSH_BASE_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY")
+
+# Remote host spec (user@ip)
+_ssh_host() {
+  local ip="$1"
+  echo "${SSH_USER}@${ip}"
+}
 
 # Global: set to 1 if any compliance check fails. Validate scripts check this
 # after run_compliance_checks() returns.
@@ -28,7 +35,7 @@ _ssh_open() {
   local socket
   socket=$(_ssh_socket_path "$ip")
 
-  if ssh -O check -o ControlPath="$socket" "root@$ip" 2>/dev/null; then
+  if ssh -O check -o ControlPath="$socket" "$(_ssh_host "$ip")" 2>/dev/null; then
     return 0
   fi
 
@@ -37,11 +44,11 @@ _ssh_open() {
     -o ControlPath="$socket" \
     -o ControlPersist=600 \
     "${SSH_BASE_OPTS[@]}" \
-    "root@$ip" 2>/dev/null
+    "$(_ssh_host "$ip")" 2>/dev/null
 
   local i
   for i in $(seq 1 30); do
-    if ssh -O check -o ControlPath="$socket" "root@$ip" 2>/dev/null; then
+    if ssh -O check -o ControlPath="$socket" "$(_ssh_host "$ip")" 2>/dev/null; then
       return 0
     fi
     [ "$i" = "1" ] && echo "==> Establishing SSH connection to $ip..."
@@ -57,7 +64,7 @@ ssh_close() {
   local ip="$1"
   local socket
   socket=$(_ssh_socket_path "$ip")
-  ssh -O exit -o ControlPath="$socket" "root@$ip" 2>/dev/null || true
+  ssh -O exit -o ControlPath="$socket" "$(_ssh_host "$ip")" 2>/dev/null || true
   rm -f "$socket"
 }
 
@@ -74,7 +81,7 @@ ssh_run() {
 
   _ssh_open "$ip" || return 1
 
-  ssh -T -o ControlPath="$socket" "${SSH_BASE_OPTS[@]}" "root@$ip" \
+  ssh -T -o ControlPath="$socket" "${SSH_BASE_OPTS[@]}" "$(_ssh_host "$ip")" \
     "echo $marker; $*; echo $marker" 2>/dev/null </dev/null \
     | tr -d '\r' \
     | sed -n "/^${marker}$/,/^${marker}$/p" \
@@ -88,7 +95,7 @@ ssh_run() {
 ssh_once() {
   local ip="$1"
   shift
-  ssh -T "${SSH_BASE_OPTS[@]}" "root@$ip" "$@" 2>/dev/null </dev/null
+  ssh -T "${SSH_BASE_OPTS[@]}" "$(_ssh_host "$ip")" "$@" 2>/dev/null </dev/null
 }
 
 # --- Remote helpers ---
@@ -301,7 +308,7 @@ run_health_checks() {
   echo "==> Running health checks..."
 
   set +e
-  ssh_once "$ip" \
+  ssh -T "${SSH_BASE_OPTS[@]}" "$(_ssh_host "$ip")" \
     "systemctl is-active s3-server.service && docker ps --format '{{.Names}} {{.Status}}'"
   HEALTH_EXIT=$?
   set -e
